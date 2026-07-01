@@ -140,29 +140,34 @@ def check_and_exit_on_rate_limit(sb, email: str) -> None:
         pass
 
 
-def parse_single_account() -> tuple[str, str]:
+def parse_accounts() -> list[tuple[str, str]]:
     raw = os.environ.get("LUNES", "").strip()
     if not raw:
-        logger.error("未设置环境变量 LUNES，请设置 LUNES=邮箱-----密码")
+        logger.error("未设置环境变量 LUNES，请设置 LUNES=邮箱-----密码（多行支持多账号）")
         sys.exit(1)
 
-    try:
-        parts = raw.split("-----")
+    accounts = []
+    # 支持以换行符分隔的多账号配置
+    lines = [line.strip() for line in raw.split('\n') if line.strip()]
+    
+    for line in lines:
+        parts = line.split("-----")
         if len(parts) >= 2:
             email = parts[0].strip()
             password = parts[1].strip()
             if email and password:
-                logger.info(f"读取到账号: {mask_email(email)}")
-                return email, password
+                accounts.append((email, password))
             else:
-                logger.error("LUNES 中邮箱或密码为空")
-                sys.exit(1)
+                logger.warning(f"⚠️ 跳过无效行（邮箱或密码为空）: {mask_email(email) if email else '未知'}")
         else:
-            logger.error(f"LUNES 格式错误，期望 '邮箱-----密码'，实际: {raw}")
-            sys.exit(1)
-    except Exception as e:
-        logger.error(f"解析 LUNES 失败: {e}")
+            logger.warning(f"⚠️ 跳过无效行（格式错误，应为 邮箱-----密码）")
+
+    if not accounts:
+        logger.error("未解析到任何有效的账号配置，请检查 LUNES 环境变量格式。")
         sys.exit(1)
+
+    logger.info(f"✅ 成功读取 {len(accounts)} 个账号")
+    return accounts
 
 
 # ================== Cloudflare 处理 ==================
@@ -589,7 +594,7 @@ def betadash_login(
                         message=f"服务器: {server_id}",
                         screenshot=screenshot,
                     )
-                    logger.info("✅ 保活成功！")
+                    logger.info(f"✅ {mask_email(email)} 保活成功！")
                     return result
 
                 if server_id == "NO_SERVER":
@@ -617,25 +622,41 @@ def betadash_login(
 
 # ================== 主程序 ==================
 def main():
-    email, password = parse_single_account()
+    accounts = parse_accounts()
     proxy = os.environ.get("PROXY_SERVER")
     display = setup_display()
+    
+    all_success = True
 
     try:
-        result = betadash_login(email, password, proxy, max_retries=1)
+        for idx, (email, password) in enumerate(accounts, 1):
+            logger.info(f"\n🚀 [{idx}/{len(accounts)}] 准备处理账号: {mask_email(email)}")
+            result = betadash_login(email, password, proxy, max_retries=1)
 
-        notify_telegram(
-            email=email,
-            ok=result["success"],
-            msg=result["message"],
-            screenshot_file=result["screenshot"],
-        )
+            # 每个账号单独推送 Telegram 通知
+            notify_telegram(
+                email=email,
+                ok=result["success"],
+                msg=result["message"],
+                screenshot_file=result["screenshot"],
+            )
 
-        if result["success"]:
-            logger.info("✅ 保活流程完成")
+            if result["success"]:
+                logger.info(f"✅ 账号 {mask_email(email)} 保活结束: 成功")
+            else:
+                logger.error(f"❌ 账号 {mask_email(email)} 保活结束: 失败")
+                all_success = False
+
+            # 处理多账号时增加 10 秒等待，防止频繁请求触发拦截
+            if idx < len(accounts):
+                logger.info("⏳ 等待 10 秒后继续处理下一个账号...")
+                time.sleep(10)
+                
+        if all_success:
+            logger.info("\n🎉 全部账号保活执行完毕！")
             sys.exit(0)
         else:
-            logger.error("❌ 保活失败")
+            logger.error("\n⚠️ 存在部分或全部账号保活失败的情况，请检查日志。")
             sys.exit(1)
 
     finally:
